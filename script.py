@@ -6,10 +6,12 @@ import requests
 import os
 import re
 import traceback
+import shutil
+import urllib.parse
 from glob import glob
 from bs4 import BeautifulSoup as bs
 from zipfile import ZipFile
-from PIL import Image
+#TODO:  remove from PIL import Image
 import praw
 try:
 	from io import BytesIO
@@ -27,29 +29,47 @@ IMAGE_FORMATS = ['bmp', 'dib', 'eps', 'ps', 'gif', 'im', 'jpg', 'jpe', 'jpeg',
 				 'pcd', 'pcx', 'png', 'pbm', 'pgm', 'ppm', 'psd', 'tif',
 				 'tiff', 'xbm', 'xpm', 'rgb', 'rast', 'svg']
 
-CONFIG = open('config-mopaitai.yaml')
-CONFIG_DATA = yaml.safe_load(CONFIG)
-# user data
-USERNAME = CONFIG_DATA['username']
-PASSWORD = CONFIG_DATA['password']
-SAVE_DIR = CONFIG_DATA['save_dir']
-ALBUM_PATH = os.path.join(SAVE_DIR, 'albums')
+VIDEO_FORMATS = ['mp4']
+
+def is_image_link(url):
+	"""
+	Takes a praw.Submission object and returns a boolean
+	describing whether or not submission links to an
+	image.
+	"""
+	url_parts = urllib.parse.urlparse(url)
+	return url_parts.path.split('.')[-1] in IMAGE_FORMATS
+
+def is_video_link(url):
+	"""
+	Takes a praw.Submission object and returns a boolean
+	describing whether or not submission links to an
+	image.
+	"""
+	url_parts = urllib.parse.urlparse(url)
+	return url_parts.path.split('.')[-1] in IMAGE_FORMATS
 
 
 
+class DownloaderException(Exception):
+	pass
 
 
 class SavedPost(object):
+	'''A post saved by the user which we will try to download.
+	'''
 
-	STATUS_PENDING = 0
-	STATUS_SAVED = 1
-	STATUS_EXCEPTION = 2
-	STATUS_NOTDONE = 3
+	# Status of each post
+	STATUS_PENDING = 0			# Not yet tried
+	STATUS_SAVED = 1			# Successful download
+	STATUS_EXCEPTION = 2		# Exception during download
+	STATUS_NOTDONE = 3			# Not done
+	STATUS_ERROR = 4			# This code detected an error
 
-	def __init__(self, submission, save_dir):
+	def __init__(self, submission, following, save_dir):
 		self.submission = submission
 		self.save_dir = save_dir
-		self.base_path = self._mk_base_path()
+		self.base_path = self._mk_base_path(following)
 		self.saved_path = ""
 		self.status_code = self.STATUS_PENDING
 		self.error_message = ""
@@ -59,7 +79,6 @@ class SavedPost(object):
 		self.status_code = self.STATUS_SAVED
 		self.saved_path = saved_path
 
-
 	def set_exception(self, message):
 		self.status_code = self.STATUS_EXCEPTION
 		self.error_message = message
@@ -68,7 +87,9 @@ class SavedPost(object):
 		self.status_code = self.STATUS_NOTDONE
 		self.error_message = message
 
-		
+	def set_error(self, message):
+		self.status_code = self.STATUS_ERROR
+		self.error_message = message
 
 
 	@property
@@ -76,19 +97,53 @@ class SavedPost(object):
 		return self.status_code == self.STATUS_SAVED
 
 
-	def _mk_base_path(self):
-		if self.submission.subreddit.display_name == "goddesses":
-			safeTitle = self.submission.title.replace("/", "").replace(" ", "").replace("\\", "").replace('"', "")
-			path = os.path.join(self.save_dir, "{}_reddit_goddesss".format(safeTitle))
+	def _mk_base_path(self, following):
+		'''Make a base name based on properties of the submission such
+		as title and posting user.
+		Parameters:
+			following - a list of user's we are following and want posts named primarily
+						based on their name.
+		'''
+		def clean_name(name, space_replacement):
+			# Replace space with specific replacement.
+			nn = name.replace(" ", space_replacement)
+			# strip non ascii.  Primarily, this removes emoji which appear in many titles.
+			ann = nn.encode('ascii', 'ignore').decode('ascii')
+			# Remove the fussy punctuation
+			ann = re.sub("[/\\\[\]\"';,.@#$%^&*(){}|!\?]", "", ann)
+			# Remove some charactes from end of string.
+			ann = re.sub("[_~-]+$", "", ann)
+			return ann
+
+		# Get author.  There may not be one.
+		author = ""
+		authorRedditor = self.submission.author
+		if authorRedditor is not None and authorRedditor.name is not None:
+			author = self.submission.author.name
+		file_name = ''
+
+
+		if self.submission.subreddit.display_name == "goddesses" and len(self.submission.title) > 2:
+			# Postings to this have a person's name.
+			safeTitle = clean_name(self.submission.title, "")
+			file_name = "{}_reddit_goddesss".format(safeTitle)
+		
+		elif author and author.lower() in following:
+			# Is this a folllowed user?  
+			if self.submission.subreddit.display_name == 'u_' + author:
+				# from own profile, don't incluide subreddit name.
+				file_name = clean_name("u_{}_{}".format(author, self.submission.title), "-")
+			else:
+				file_name = clean_name("u_{}_{}_{}".format(author, self.submission.subreddit.display_name, self.submission.title), "-")
+
 		else:
-			safeTitle = self.submission.title.replace("/", "").replace(" ", "-").replace("\\", "").replace('"', "")
-			safeTitle = re.sub("[/\\\[\]\?\"';,.@#$%^&*(){}|!]", "", safeTitle)
-			author = ""
-			authorRedditor = self.submission.author
-			if authorRedditor is not None and authorRedditor.name is not None:
-				author = "_" + self.submission.author.name
-			path = os.path.join(self.save_dir, "r_{}{}_{}".format(self.submission.subreddit.display_name, author, safeTitle))
-		return path
+			# Normal case.
+			safeTitle = clean_name(self.submission.title, "-")
+			file_name = clean_name("r_{}{}_{}".format(self.submission.subreddit.display_name, 
+										"_" + author if author else "", safeTitle), "-")
+
+		# Join to save directory.
+		return os.path.join(self.save_dir, file_name)
 
 
 
@@ -108,18 +163,9 @@ class Downloader(object):
 		self.album_path = os.path.join(self.saved_post.save_dir, 'albums')
 		print("Downloading {} - {} ({})".format(self.submission.subreddit.display_name, self.submission.title, self.submission.url))
 
-	def is_image_link(self, sub):
-		"""
-		Takes a praw.Submission object and returns a boolean
-		describing whether or not submission links to an
-		image.
-		"""
-		if sub.url.split('.')[-1] in IMAGE_FORMATS:
-			return True
-		else:
-			return False
 
-	def check_if_image_exists(self, path, is_file=True):
+
+	def _check_if_image_exists(self, path, is_file=True):
 		"""
 		Takes a path an checks whether it exists or not.
 		param: is_file: Used to determine if its a full name
@@ -127,7 +173,7 @@ class Downloader(object):
 		"""
 		return os.path.isfile(path) if is_file else len(glob(path + '*')) >= 1
 
-	def mk_unique_name(self, path):
+	def _mk_unique_name(self, path):
 		num = 1
 		(p,e) = os.path.splitext(path)
 		while os.path.exists(path):
@@ -136,39 +182,76 @@ class Downloader(object):
 		return path
 
 
-	def download_and_save(self, url, custom_path=None):
-		"""
-		Receives an url.
-		Download the image (bytes)
-		Store it.
-		"""
+	# This version uses Pillow (PIL) image library to
+	# create file extenion based on image type.
+	# But most URL have type extension so this is one dependency I was able to remove.
+	# def _download_and_save(self, url, file_base_path):
+	# 	"""
+	# 	Receives an url.
+	# 	Download the image (bytes)
+	# 	Store it.
+	# 	"""
+	# 	response = requests.get(url)
+	# 	img = Image.open(BytesIO(response.content))
+	# 	img.verify()
+	# 	path = file_base_path + "." + img.format.lower()
+	# 	path = self._mk_unique_name(path)
+	# 	Image.open(BytesIO(response.content)).save(path)
+	# 	self.saved_post.set_saved(path)
+	# 	print ("  > {}".format(path))
 
-		response = requests.get(url)
-		img = Image.open(BytesIO(response.content))
-		img.verify()
-		if not custom_path:
-			path = self.saved_post.base_path + "." + img.format.lower()
+
+
+
+	def _download_to_file(self, url, file_path_base, extension=None):
+		if extension:
+			if not extension.startswith('.'):
+				extension = '.' + extension
 		else:
-			path = custom_path + "." + img.format.lower()
-		path = self.mk_unique_name(path)
-		Image.open(BytesIO(response.content)).save(path)
-		self.saved_post.set_saved(path)
-		print ("  > {}".format(path))
+			# Get extention from path
+			urlParts = urllib.parse.urlparse(url)
+			(p, extension) = os.path.splitext(urlParts.path)
+
+		file_path = self._mk_unique_name(file_path_base + extension)
+		
+
+		# Initiate the request.  stream=True allows streaming reading
+		# (and use of copyfileobj)
+		rv = requests.get(url, stream=True)
+		if rv.status_code != 200:
+			self.saved_post.set_error("Request to {} returned code {}".format(srcurl, rv.status_code))
+			rv.close()
+			raise DownloaderException()
+			
+		print ("    {} -> {}".format(url, file_path))
+		with open(file_path, 'wb') as f:
+			rv.raw.decode_content = True
+			shutil.copyfileobj(rv.raw, f)   
+		rv.close()
+		return file_path
+
+	def download(self):
+		pass
 
 
-	def direct_link(self):
+
+
+class DirectDownloader(Downloader):
+	'''Download from a direct link to the media file.'''
+	def download(self):
 		"""
 		Direct link to image
 		"""
 		try:
-			self.download_and_save(self.submission.url)
+			file_path = self._download_to_file(self.submission.url, self.saved_post.base_path)
+			self.saved_post.set_saved(file_path)
 		except Exception as ex:
 			self.saved_post.set_exception(str(ex))
 			traceback.print_exc()
 
 
-
-	def imgur_album(self):
+class ImagureAlbumDownloader():
+	def download(self):
 		"""
 		Album from imgur
 		"""
@@ -226,29 +309,69 @@ class Downloader(object):
 					if img_url.startswith('//'):
 						img_url = "http:{0}".format(img_url)
 					print("    {0}".format(img_url))
-					self.download_and_save(img_url, custom_path=path +
-										   "/" + str(counter))
+					self._download_to_file(img_url, os.path.join(path, str(counter)))
 				except Exception as ex:
 					self.saved_post.set_exception(str(ex))
 					traceback.print_exc()
 					return
 				counter += 1
+		self.saved_post.set_saved(path)
 
-	def imgur_link(self):
+
+class ImagureLinkDownloader(Downloader):
+	'''
+        	<video poster="//i.imgur.com/ebQD4MQh.jpg"
+                preload="auto"
+                autoplay="autoplay"
+                muted="muted"  loop="loop"
+            webkit-playsinline></video>
+            <div class="video-elements">
+                <source src="//i.imgur.com/ebQD4MQ.mp4" type="video/mp4">
+            </div>
+ 
+
+	'''
+
+	def _find_video_link(self, soup):
+		divnode = soup.find_all('div', { 'class': 'video-elements' })
+		if not divnode or len(divnode) == 0:
+			return None
+		srcnode = divnode[0].find_all('source')
+		if not srcnode:
+			return None
+		return srcnode[0].attrs['src']
+
+		
+
+	def download(self):
 		"""
 		Image from imgur
 		"""
 		# just a hack. i dont know if this will be a .jpg, but in order to
 		# download an image data, I have to write an extension
-		new_url = "http://i.imgur.com/%s.jpg" % \
-			(os.path.split(self.submission.url)[1])
+		r = requests.get(self.submission.url)
+		soup = bs(r.text, features="html.parser")
+		if self.submission.url.endswith('gifv'):
+			media_url = self._find_video_link(soup)
+		else:
+			self.saved_post.set_error("Unknown Imagur link type")
+			return		
+		if not media_url:
+			self.saved_post.set_error("Failed to find Imagur link")
+			return
+
+		media_url = "http:" + media_url
 		try:
-			self.download_and_save(new_url)
+			file_path = self._download_to_file(media_url, self.saved_post.base_path)
+			self.saved_post.set_saved(file_path)
 		except Exception as ex:
 			self.saved_post.set_exception(ex)
 			traceback.print_exc()
 
-	def tumblr_link(self):
+
+
+class TumblrDownloader(Downloader):
+	def download(self):
 		"""
 		Tumblr image link
 		"""
@@ -264,12 +387,15 @@ class Downloader(object):
 				# img = div.find("img")
 				# img_url = img.attrs["src"]
 				try:
-					self.download_and_save(img_url)
+					self._download_to_file(img_url, self.saved_post.base_path)
 				except Exception as ex:
 					self.saved_post.set_exception(ex)
 					traceback.print_exc()
+		self.saved_post.set_saved(self.saved_post.base_path)
 
-	def flickr_link(self):
+
+class FlickrDownloader(Downloader):
+	def download(self):
 		"""
 		Flickr image link
 		"""
@@ -279,22 +405,27 @@ class Downloader(object):
 		img_element = div_element.find("img")
 		img_url = img_element.attrs['src']
 		try:
-			self.download_and_save(img_url)
+			file_path = self._download_to_file(img_url, self.saved_post.base_path)
+			self.saved_post.set_saved(file_path)
 		except Exception as ex:
 			self.saved_post.set_exception(ex)
 			traceback.print_exc()
 
-	def picsarus_link(self):
+class PicsarusDownloader(Downloader):
+	def download(self):
 		"""
 		Picsarus image link
 		"""
 		try:
-			self.download_and_save(self.submission.url + ".jpg")
+			file_path = self._download_to_file(self.submission.url + ".jpg")
+			self.saved_post.set_saved(file_path)
 		except Exception as ex:
 			self.saved_post.set_exception(ex)
 			traceback.print_exc()
 
-	def picasaurus_link(self):
+
+class PicasaurusDownloader(Downloader):
+	def download(self):
 		"""
 		Picasaurus image link
 		"""
@@ -303,47 +434,94 @@ class Downloader(object):
 		img = soup.find("img", {"class": "photoQcontent"})
 		img_url = img.attrs['src']
 		try:
-			self.download_and_save(img_url)
+			file_path = self._download_to_file(img_url, self.saved_post.base_path)
+			self.saved_post.set_saved(file_path)
 		except Exception as ex:
 			self.saved_post.set_exception(ex)
 			traceback.print_exc()
 
-	def choose_download_method(self):
-		"""
-		This method allows to decide how to process the image
-		"""
-		if self.is_image_link(self.submission):
-			self.direct_link()
-		else:
-			# not direct, read domain
-			if 'imgur' in self.submission.domain:
-				# check if album
-				if '/a/' in self.submission.url:
-					self.imgur_album()
-				else:
-					self.imgur_link()
-			elif 'tumblr' in self.submission.domain:
-				self.tumblr_link()
-			elif 'flickr' in self.submission.domain:
-				self.flickr_link()
-			elif 'picsarus' in self.submission.domain:
-				self.picsarus_link()
-			elif 'picasaurus' in self.submission.domain:
-				self.picasaurus_link()
+
+
+class GyfcatDownloader(Downloader):
+	def download(self):
+		r = requests.get(self.submission.url)
+		soup = bs(r.text, features="html.parser")
+
+		# make tag.  Get the last component of URL.
+		url_parts = urllib.parse.urlparse(self.submission.url)
+		parts = url_parts.path.split('/')
+		vn = parts[-1]
+		parts = vn.split('-')
+		vn = parts[0]
+		videotag = 'video-' + vn.lower()
+		video_path = ""
+		
+		videonode = soup.find_all('video', id=videotag)
+		if len(videonode) < 1:
+			self.saved_post.set_error("gyfcat.com: failed to find 'video' node with tag '{}'".format(videotag))
+			return
+		if len(videonode) > 1:
+			self.saved_post.set_error("gyfcat.com: found {} 'video' nodes with tag '{}'".format(len(videonode), videotag))
+			return
+			
+		srcCount = 0
+		print ("  Saving video to:")
+		for videosource in videonode[0].find_all('source', type="video/mp4"):
+			src_url = videosource.attrs['src']
+			if not 'thumbs' in src_url:
+				srcCount += 1
+				base_path = self.saved_post.base_path + '_' + str(srcCount)
+				video_path = self._download_to_file(src_url, base_path)
+				if os.path.getsize(video_path) == 0:
+					print ("ERROR:  zero size file")
+					self.saved_post.set_error("File was zero size - not downloaded")
+					return
+					
+		
+		r.close()
+		self.saved_post.set_saved(video_path)
+
+
+
+def make_downloader(saved_post, is_expirmental=False):
+	"""
+	This method allows to decide how to process the image
+	"""
+	is_broken = False
+	result = None
+	if is_image_link(saved_post.submission.url):
+		result = DirectDownloader(saved_post)
+	else:
+		# not direct, read domain
+		if 'gfycat' in saved_post.submission.domain:
+			result = GyfcatDownloader(saved_post)
+		elif 'imgur' in saved_post.submission.domain:
+			# check if album
+			if '/a/' in saved_post.submission.url:
+				result = ImagureAlbumDownloader(saved_post)
 			else:
-				self.saved_post.set_notdone("Domain '{}' not supported".format(self.submission.domain))
+				result = ImagureLinkDownloader(saved_post)
+		elif is_expirmental and 'tumblr' in saved_post.submission.domain:
+			result = TumblrDownloader(saved_post)
+		elif is_expirmental and 'flickr' in saved_post.submission.domain:
+			result = FlickrDownloader(saved_post)
+		elif is_expirmental and 'picsarus' in saved_post.submission.domain:
+			result = PicsarusDownloader(saved_post)
+		elif is_expirmental and 'picasaurus' in saved_post.submission.domain:
+			result = PicasaurusDownloader(saved_post)
+	return result
 
 
-def save_posts(save_dir, limit=0, is_unsave=True):
-	R = praw.Reddit("bot1")
+
+def save_posts(R, username, save_dir, following, limit=0, is_unsave=True, is_expirmental=False):
 	print("Logging in...")
 	# create session
 	print (R.user.me())
 	print("Logged in.")
 	print("Getting data...")
 	# this returns a generator
-	red = R.redditor(USERNAME)
-	saved_posts = [ SavedPost(x, save_dir) for x in red.saved(limit=None) ]
+	red = R.redditor(username)
+	saved_posts = [ SavedPost(x, following, save_dir) for x in red.saved(limit=None) ]
 	print ("{} posts found".format(len(saved_posts)))
 
 	count = 0
@@ -352,8 +530,11 @@ def save_posts(save_dir, limit=0, is_unsave=True):
 		if sp.submission.url.endswith('/'):
 			sp.submission.url = sp.submission.url[0:-1]
 		# create object per submission. Trusting garbage collector!
-		d = Downloader(sp)
-		d.choose_download_method()
+		d = make_downloader(sp, is_expirmental=is_expirmental)
+		if d is None:
+			sp.set_notdone("Domain '{}' not supported".format(sp.submission.domain))
+			continue
+		d.download()
 		count += 1
 		if limit > 0 and count >= limit:
 			break
@@ -370,14 +551,41 @@ def save_posts(save_dir, limit=0, is_unsave=True):
 
 	for sp in saved_posts:
 		if not sp.is_saved:
-			print ("{}: {} error {}".format(sp.submission.title, sp.status_code, sp.error_message))
+			print ("{1}: {2} - {0}".format(sp.submission.title, sp.status_code, sp.error_message))
 
+
+
+
+
+CONFIG = open('config-mopaitai.yaml')
+CONFIG_DATA = yaml.safe_load(CONFIG)
+# user data
+USERNAME = CONFIG_DATA['username']
+PASSWORD = CONFIG_DATA['password']
+CLIENT_ID = CONFIG_DATA['client_id']
+CLIENT_SECRET = CONFIG_DATA['client_secret']
+USER_AGENT = CONFIG_DATA['user_agent']
+FOLLOWING = CONFIG_DATA['following']
+SAVE_DIR = os.path.expanduser(CONFIG_DATA['save_dir'])
 
 
 # check if dir exists
-if not os.path.exists(SAVE_DIR):
-	os.mkdir(SAVE_DIR)
-if not os.path.exists(os.path.join(SAVE_DIR, 'albums')):
-	os.mkdir(ALBUM_PATH)
 
-save_posts(SAVE_DIR)
+if not os.path.exists(SAVE_DIR):
+	print ("Save directory '{}' does not exist".format(SAVE_DIR))
+	sys.exit(-1)
+
+# Using configuration in praw.ini
+#R = praw.Reddit("bot1")
+R = praw.Reddit(user_agent=USER_AGENT, 
+				client_id=CLIENT_ID, client_secret=CLIENT_SECRET, 
+				password=PASSWORD, username=USERNAME)
+
+
+# Download all known-working types.
+save_posts(R, USERNAME, SAVE_DIR, FOLLOWING, is_unsave=True, limit=0, is_expirmental=False)
+
+# Test expirmental
+#save_posts(R, USERNAME, SAVE_DIR, FOLLOWING, is_unsave=False, limit=1, is_expirmental=True)
+
+#save_posts(R, USERNAME, SAVE_DIR, FOLLOWING, is_unsave=True, limit=2, is_expirmental=True)
