@@ -7,6 +7,7 @@ import os
 import re
 import traceback
 import shutil
+import importlib.util
 import urllib.parse
 from glob import glob
 from bs4 import BeautifulSoup as bs
@@ -55,49 +56,13 @@ class DownloaderException(Exception):
 	pass
 
 
-class SavedPost(object):
-	'''A post saved by the user which we will try to download.
-	'''
 
-	# Status of each post
-	STATUS_PENDING = 0			# Not yet tried
-	STATUS_SAVED = 1			# Successful download
-	STATUS_EXCEPTION = 2		# Exception during download
-	STATUS_NOTDONE = 3			# Not done
-	STATUS_ERROR = 4			# This code detected an error
+class FileNamer(object):
 
-	def __init__(self, submission, following, save_dir):
-		self.submission = submission
-		self.save_dir = save_dir
-		self.base_path = self._mk_base_path(following)
-		self.saved_path = ""
-		self.status_code = self.STATUS_PENDING
-		self.error_message = ""
+	def __init__(self, yamlConfig):
+		pass
 
-
-	def set_saved(self, saved_path):
-		self.status_code = self.STATUS_SAVED
-		self.saved_path = saved_path
-
-	def set_exception(self, message):
-		self.status_code = self.STATUS_EXCEPTION
-		self.error_message = message
-
-	def set_notdone(self, message):
-		self.status_code = self.STATUS_NOTDONE
-		self.error_message = message
-
-	def set_error(self, message):
-		self.status_code = self.STATUS_ERROR
-		self.error_message = message
-
-
-	@property
-	def is_saved(self):
-		return self.status_code == self.STATUS_SAVED
-
-
-	def _mk_base_path(self, following):
+	def name_for(self, submission):
 		'''Make a base name based on properties of the submission such
 		as title and posting user.
 		Parameters:
@@ -123,27 +88,54 @@ class SavedPost(object):
 		file_name = ''
 
 
-		if self.submission.subreddit.display_name == "goddesses" and len(self.submission.title) > 2:
-			# Postings to this have a person's name.
-			safeTitle = clean_name(self.submission.title, "")
-			file_name = "{}_reddit_goddesss".format(safeTitle)
-		
-		elif author and author.lower() in following:
-			# Is this a folllowed user?  
-			if self.submission.subreddit.display_name == 'u_' + author:
-				# from own profile, don't incluide subreddit name.
-				file_name = clean_name("u_{}_{}".format(author, self.submission.title), "-")
-			else:
-				file_name = clean_name("u_{}_{}_{}".format(author, self.submission.subreddit.display_name, self.submission.title), "-")
-
-		else:
-			# Normal case.
-			safeTitle = clean_name(self.submission.title, "-")
-			file_name = clean_name("r_{}{}_{}".format(self.submission.subreddit.display_name, 
-										"_" + author if author else "", safeTitle), "-")
+		# Normal case.
+		file_name = clean_name("r_{}{}_{}".format(self.submission.subreddit.display_name, 
+									"_" + author if author else "", self.submission.title), "-")
 
 		# Join to save directory.
-		return os.path.join(self.save_dir, file_name)
+		return file_name
+
+
+class SavedPost(object):
+	'''A post saved by the user which we will try to download.
+	'''
+
+	# Status of each post
+	STATUS_PENDING = 0			# Not yet tried
+	STATUS_SAVED = 1			# Successful download
+	STATUS_EXCEPTION = 2		# Exception during download
+	STATUS_NOTDONE = 3			# Not done
+	STATUS_ERROR = 4			# This code detected an error
+
+	def __init__(self, submission, save_dir, namer):
+		self.submission = submission
+		self.save_dir = save_dir
+		self.base_path = os.path.join(save_dir, namer.name_for(submission))
+		self.saved_path = ""
+		self.status_code = self.STATUS_PENDING
+		self.error_message = ""
+
+
+	def set_saved(self, saved_path):
+		self.status_code = self.STATUS_SAVED
+		self.saved_path = saved_path
+
+	def set_exception(self, message):
+		self.status_code = self.STATUS_EXCEPTION
+		self.error_message = message
+
+	def set_notdone(self, message):
+		self.status_code = self.STATUS_NOTDONE
+		self.error_message = message
+
+	def set_error(self, message):
+		self.status_code = self.STATUS_ERROR
+		self.error_message = message
+
+
+	@property
+	def is_saved(self):
+		return self.status_code == self.STATUS_SAVED
 
 
 
@@ -513,7 +505,7 @@ def make_downloader(saved_post, is_expirmental=False):
 
 
 
-def save_posts(R, username, save_dir, following, limit=0, is_unsave=True, is_expirmental=False):
+def save_posts(R, username, save_dir, namer, limit=0, is_unsave=True, is_expirmental=False):
 	print("Logging in...")
 	# create session
 	print (R.user.me())
@@ -521,7 +513,7 @@ def save_posts(R, username, save_dir, following, limit=0, is_unsave=True, is_exp
 	print("Getting data...")
 	# this returns a generator
 	red = R.redditor(username)
-	saved_posts = [ SavedPost(x, following, save_dir) for x in red.saved(limit=None) ]
+	saved_posts = [ SavedPost(x, save_dir, namer) for x in red.saved(limit=None) ]
 	print ("{} posts found".format(len(saved_posts)))
 
 	count = 0
@@ -567,6 +559,21 @@ CLIENT_SECRET = CONFIG_DATA['client_secret']
 USER_AGENT = CONFIG_DATA['user_agent']
 FOLLOWING = CONFIG_DATA['following']
 SAVE_DIR = os.path.expanduser(CONFIG_DATA['save_dir'])
+NAMER_MODULE = CONFIG_DATA['namer_module']
+
+#
+# Config file can name a different file namer. 
+#
+if NAMER_MODULE:
+	# Load the module from the given file name and create a 
+	# file namer object.
+	spec = importlib.util.spec_from_file_location("namer", NAMER_MODULE)
+	foo = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(foo)
+	namer = foo.FileNamer(CONFIG_DATA)
+else:
+	namer = FileNamer(CONFIG_DATA)
+
 
 
 # check if dir exists
@@ -583,9 +590,9 @@ R = praw.Reddit(user_agent=USER_AGENT,
 
 
 # Download all known-working types.
-save_posts(R, USERNAME, SAVE_DIR, FOLLOWING, is_unsave=True, limit=0, is_expirmental=False)
+save_posts(R, USERNAME, SAVE_DIR, namer, is_unsave=True, limit=0, is_expirmental=False)
 
 # Test expirmental
-#save_posts(R, USERNAME, SAVE_DIR, FOLLOWING, is_unsave=False, limit=1, is_expirmental=True)
+#save_posts(R, USERNAME, SAVE_DIR, namer, is_unsave=False, limit=1, is_expirmental=True)
 
-#save_posts(R, USERNAME, SAVE_DIR, FOLLOWING, is_unsave=True, limit=2, is_expirmental=True)
+#save_posts(R, USERNAME, SAVE_DIR, namer, is_unsave=True, limit=1, is_expirmental=True)
