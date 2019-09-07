@@ -3,24 +3,36 @@ import datetime
 
 
 
+class PersonName(object):
+	'''An person's name with variants for how that name may appear.'''
+
+	def __init__(self, name):
+		self.name = name
+		lpn = name.lower()
+		self._variants = [ lpn, 
+					lpn.replace(' ', ''), 
+					lpn.replace(' ', '-'),
+					lpn.replace(' ', '_')
+				]
+
+	def is_name(self, s):
+		ls = s.lower()
+		for n in self._variants:
+			if n in ls:
+				return True
+
+
 class FileNamer(object):
 	def __init__(self, yamlConfig):
 		self._following = yamlConfig['following']
 		self._subusingnames = yamlConfig['subusingnames']
-		self._names = yamlConfig['names']
-		self._names_compact = [ x.replace(' ', '').lower() for x in self._names ]
+		self._names = [ PersonName(x) for x in yamlConfig['names'] ]
 
 
 	def _recognize_person_name(self, title, author, sub_name):
-		title = title.lower()
-		author = author.lower()
-		sub_name = sub_name.lower()
-		for i in range(len(self._names)):
-			full_name = self._names[i].lower()
-			compact_name = self._names_compact[i]
-			if full_name in title or full_name in author or full_name in sub_name or \
-				compact_name in title or compact_name in author or compact_name in sub_name:
-				return self._names[i]
+		for name in self._names:
+			if name.is_name(title) or name.is_name(author) or name.is_name(sub_name):
+				return name.name
 		return None
 
 	def _posting_time(self, submission):
@@ -43,6 +55,7 @@ class FileNamer(object):
 			nn = name.replace(" ", space_replacement)
 			# strip non ascii.  Primarily, this removes emoji which appear in many titles.
 			ann = nn.encode('ascii', 'ignore').decode('ascii')
+			ann = ann.replace("_-_", "-")
 			# Remove the fussy punctuation
 			ann = re.sub("[/\\\[\]\"';,.@#$%^&*(){}|!\?]", "", ann)
 			# Remove some charactes from end of string.
