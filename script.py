@@ -4,6 +4,7 @@ Python script to download saved images from reddit
 from __future__ import print_function
 import requests
 import os
+URLimport sys
 import re
 import traceback
 import shutil
@@ -20,6 +21,9 @@ except ImportError:
 	from StringIO import BytesIO
 import time
 import yaml
+import json
+import html
+
 
 
 __author__ = 'Adrian Espinosa'
@@ -153,7 +157,7 @@ class Downloader(object):
 		self.saved_post = saved_post
 		self.submission = saved_post.submission
 		self.album_path = os.path.join(self.saved_post.save_dir, 'albums')
-		print("Downloading {} - {} ({})".format(self.submission.subreddit.display_name, self.submission.title, self.submission.url))
+		print("    Downloading {} - {} ({})".format(self.submission.subreddit.display_name, self.submission.title, self.submission.url))
 
 
 
@@ -211,11 +215,12 @@ class Downloader(object):
 		# (and use of copyfileobj)
 		rv = requests.get(url, stream=True)
 		if rv.status_code != 200:
-			self.saved_post.set_error("Request to {} returned code {}".format(srcurl, rv.status_code))
+			self.saved_post.set_error("Request to {} returned code {}".format(url, rv.status_code))
 			rv.close()
+			print (f"   HTTP get returned {rv.status_code}")
 			raise DownloaderException()
 			
-		print ("    {} -> {}".format(url, file_path))
+		print ("    Saved to {}".format(url, file_path))
 		with open(file_path, 'wb') as f:
 			rv.raw.decode_content = True
 			shutil.copyfileobj(rv.raw, f)   
@@ -403,6 +408,44 @@ class FlickrDownloader(Downloader):
 			self.saved_post.set_exception(ex)
 			traceback.print_exc()
 
+class RedgifsDownloader(Downloader):
+	def download(self):
+		"""
+		Flickr image link
+		"""
+		response = requests.get(self.submission.url)
+		soup = bs(response.content)
+		element = soup.find("script", {"type": "application/ld+json"})
+		if element is None:
+			err = "redgifs failed to find script element"
+			self.saved_post.set_error(err)
+			print ("   " + err)
+			return
+		jobj = json.loads(element.text)
+		if jobj is None:
+			err = "redgifs failed to parse json"
+			self.saved_post.set_error(err)
+			print ("   " + err)
+			return
+		video = jobj['video']
+		if video is None:
+			err = "redgifs json had no 'video' element"
+			self.saved_post.set_error(err)
+			print ("   " + err)
+			return
+		img_url = html.unescape(video['contentUrl'])
+		if img_url is None:
+			err = "redgifs json had no 'contentUrl' element"
+			self.saved_post.set_error(err)
+			print ("   " + err)
+			return
+		try:
+			file_path = self._download_to_file(img_url, self.saved_post.base_path)
+			self.saved_post.set_saved(file_path)
+		except Exception as ex:
+			self.saved_post.set_exception(ex)
+			traceback.print_exc()
+
 class PicsarusDownloader(Downloader):
 	def download(self):
 		"""
@@ -457,7 +500,7 @@ class GyfcatDownloader(Downloader):
 			return
 			
 		srcCount = 0
-		print ("  Saving video to:")
+		print ("    Saving video to:")
 		for videosource in videonode[0].find_all('source', type="video/mp4"):
 			src_url = videosource.attrs['src']
 			if not 'thumbs' in src_url:
@@ -493,6 +536,8 @@ def make_downloader(saved_post, is_expirmental=False):
 				result = ImagureAlbumDownloader(saved_post)
 			else:
 				result = ImagureLinkDownloader(saved_post)
+		elif is_expirmental and 'redgifs' in saved_post.submission.domain:
+			result = RedgifsDownloader(saved_post)
 		elif is_expirmental and 'tumblr' in saved_post.submission.domain:
 			result = TumblrDownloader(saved_post)
 		elif is_expirmental and 'flickr' in saved_post.submission.domain:
@@ -501,6 +546,7 @@ def make_downloader(saved_post, is_expirmental=False):
 			result = PicsarusDownloader(saved_post)
 		elif is_expirmental and 'picasaurus' in saved_post.submission.domain:
 			result = PicasaurusDownloader(saved_post)
+
 	return result
 
 
@@ -521,6 +567,7 @@ def save_posts(R, username, save_dir, namer, limit=0, is_unsave=True, is_expirme
 		# delete trailing slash
 		if sp.submission.url.endswith('/'):
 			sp.submission.url = sp.submission.url[0:-1]
+		print (sp.submission.url)
 		# create object per submission. Trusting garbage collector!
 		d = make_downloader(sp, is_expirmental=is_expirmental)
 		if d is None:
@@ -590,9 +637,9 @@ R = praw.Reddit(user_agent=USER_AGENT,
 
 
 # Download all known-working types.
-save_posts(R, USERNAME, SAVE_DIR, namer, is_unsave=True, limit=0, is_expirmental=False)
+save_posts(R, USERNAME, SAVE_DIR, namer, is_unsave=True, limit=0, is_expirmental=True)
 
 # Test expirmental
-#save_posts(R, USERNAME, SAVE_DIR, namer, is_unsave=False, limit=1, is_expirmental=True)
+#save_posts(R, USERNAME, SAVE_DIR, namer, is_unsave=True, limit=10, is_expirmental=True)
 
 #save_posts(R, USERNAME, SAVE_DIR, namer, is_unsave=True, limit=1, is_expirmental=True)

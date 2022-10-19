@@ -55,9 +55,12 @@ class FileNamer(object):
 			nn = name.replace(" ", space_replacement)
 			# strip non ascii.  Primarily, this removes emoji which appear in many titles.
 			ann = nn.encode('ascii', 'ignore').decode('ascii')
+			# Replace a common result of removing space
 			ann = ann.replace("_-_", "-")
 			# Remove the fussy punctuation
 			ann = re.sub("[/\\\[\]\"';,.@#$%^&*(){}|!\?]", "", ann)
+			# Replace double punctuation
+			#for p in "-_"
 			# Remove some charactes from end of string.
 			ann = re.sub("[_~-]+$", "", ann)
 			return ann
