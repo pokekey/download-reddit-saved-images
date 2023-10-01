@@ -1,10 +1,10 @@
 """
 Python script to download saved images from reddit
 """
-from __future__ import print_function
+import typing as t
 import requests
 import os
-URLimport sys
+import sys
 import re
 import traceback
 import shutil
@@ -36,6 +36,16 @@ IMAGE_FORMATS = ['bmp', 'dib', 'eps', 'ps', 'gif', 'im', 'jpg', 'jpe', 'jpeg',
 
 VIDEO_FORMATS = ['mp4']
 
+user_agent_version = 1.0
+
+def get_user_agent() -> str:
+	global user_agent_version
+	user_agent_version += 0.1
+	return (f"PAW {user_agent_version:0.1f}")
+
+def make_headers(url: str) -> t.Dict[str,str]:
+	return { 'User-Agent': get_user_agent() }
+
 def is_image_link(url):
 	"""
 	Takes a praw.Submission object and returns a boolean
@@ -52,7 +62,7 @@ def is_video_link(url):
 	image.
 	"""
 	url_parts = urllib.parse.urlparse(url)
-	return url_parts.path.split('.')[-1] in IMAGE_FORMATS
+	return url_parts.path.split('.')[-1] in VIDEO_FORMATS
 
 
 
@@ -213,14 +223,14 @@ class Downloader(object):
 
 		# Initiate the request.  stream=True allows streaming reading
 		# (and use of copyfileobj)
-		rv = requests.get(url, stream=True)
+		rv = requests.get(url, headers=make_headers(url), stream=True)
 		if rv.status_code != 200:
 			self.saved_post.set_error("Request to {} returned code {}".format(url, rv.status_code))
 			rv.close()
 			print (f"   HTTP get returned {rv.status_code}")
 			raise DownloaderException()
 			
-		print ("    Saved to {}".format(url, file_path))
+		print ("    Saved to {}".format(file_path))
 		with open(file_path, 'wb') as f:
 			rv.raw.decode_content = True
 			shutil.copyfileobj(rv.raw, f)   
@@ -254,8 +264,9 @@ class ImagureAlbumDownloader():
 		"""
 		download_url = 'http://s.imgur.com/a/%s/zip' % \
 			(os.path.split(self.submission.url)[1])
+		headers = make_headers(download_url)
 		try:
-			response = requests.get(download_url)
+			response = requests.get(download_url, headers=headers)
 		except Exception as ex:
 			self.saved_post.set_exception(str(ex))
 			traceback.print_exc()
@@ -288,7 +299,8 @@ class ImagureAlbumDownloader():
 				idimage = idimage[0:idimage.index("#")]
 			url = "http://imgur.com/a/%s/layout/blog" % (idimage)
 
-			response = requests.get(url)
+			headers=make_headers(url)
+			response = requests.get(url, headers=headers)
 			soup = bs(response.content)
 			container_element = soup.find("div", {"id": "image-container"})
 			try:
@@ -346,7 +358,8 @@ class ImagureLinkDownloader(Downloader):
 		"""
 		# just a hack. i dont know if this will be a .jpg, but in order to
 		# download an image data, I have to write an extension
-		r = requests.get(self.submission.url)
+		headers=make_headers(self.submission.url)
+		r = requests.get(self.submission.url, headers=headers)
 		soup = bs(r.text, features="html.parser")
 		if self.submission.url.endswith('gifv'):
 			media_url = self._find_video_link(soup)
@@ -373,7 +386,7 @@ class TumblrDownloader(Downloader):
 		Tumblr image link
 		"""
 		response = requests.get(self.submission.url)
-		soup = bs(response.content)
+		soup = bs(response.content, features="html.parser")
 		# div = soup.find("div", {'class': 'post'})
 		# if not div:
 		#     div = soup.find("li", {'class': 'post'})
@@ -397,7 +410,7 @@ class FlickrDownloader(Downloader):
 		Flickr image link
 		"""
 		response = requests.get(self.submission.url)
-		soup = bs(response.content)
+		soup = bs(response.content, features="html.parser")
 		div_element = soup.find("div", {"class": "photo-div"})
 		img_element = div_element.find("img")
 		img_url = img_element.attrs['src']
@@ -411,14 +424,14 @@ class FlickrDownloader(Downloader):
 class RedgifsDownloader(Downloader):
 	def download(self):
 		"""
-		Flickr image link
+		Redgifs link
 		"""
 		response = requests.get(self.submission.url)
-		soup = bs(response.content)
+		soup = bs(response.content, features="html.parser")
 		element = soup.find("script", {"type": "application/ld+json"})
 		if element is None:
 			err = "redgifs failed to find script element"
-			self.saved_post.set_error(err)
+			self.saved_post.set_error(f"{err} ({self.submission.url})")
 			print ("   " + err)
 			return
 		jobj = json.loads(element.text)
@@ -445,6 +458,44 @@ class RedgifsDownloader(Downloader):
 		except Exception as ex:
 			self.saved_post.set_exception(ex)
 			traceback.print_exc()
+
+
+class ReditGalleryDownloader(Downloader):
+	def download(self):
+		"""
+		Flickr image link
+		"""
+		print (f"    fetching gallery {self.submission.url}")
+		time.sleep(2.0)
+		response = requests.get(self.submission.url)
+		if response.status_code != 200:
+			self.saved_post.set_error(f"HTTP get returned {response.status_code}")
+			return
+
+		soup = bs(response.content, features="html.parser")
+
+		elements = soup.find_all("a", href=re.compile("preview.redd.it"))
+		links = [] 
+
+		try:
+			for e in elements:
+				l = e['href']
+				img_url = html.unescape(l)
+				links.append (img_url)
+		except Exception as e:
+			self.saved_post.set_exception(e)
+			return
+
+		files = []
+		for link in links:
+			try:
+				file_path = self._download_to_file(link, self.saved_post.base_path)
+				files.append(file_path)
+			except Exception as ex:
+				self.saved_post.set_exception(ex)
+				return
+		self.saved_post.set_saved(":".join(files))
+
 
 class PicsarusDownloader(Downloader):
 	def download(self):
@@ -475,6 +526,28 @@ class PicasaurusDownloader(Downloader):
 			self.saved_post.set_exception(ex)
 			traceback.print_exc()
 
+
+class GyfcatRedgisDownloader(Downloader):
+	def download(self):
+		r = requests.get(self.submission.url)
+		if r.status_code != 200:
+			self.saved_post.set_error(f"HTTP get returns status {r.status_code}")
+			return
+
+		soup = bs(r.text, features="html.parser")
+
+		redirect_link = soup.find("link", rel="canonical" )
+		if redirect_link is None:
+			self.saved_post.set_error(f"No redirect link found")
+			return			
+			
+		link = redirect_link['href']
+		print (f"    Redirected to {link}")
+		self.submission.url = link
+
+		reddl = RedgifsDownloader(self.saved_post)
+
+		reddl.download()
 
 
 class GyfcatDownloader(Downloader):
@@ -526,10 +599,12 @@ def make_downloader(saved_post, is_expirmental=False):
 	result = None
 	if is_image_link(saved_post.submission.url):
 		result = DirectDownloader(saved_post)
+	elif is_video_link(saved_post.submission.url):
+		result = DirectDownloader(saved_post)
 	else:
 		# not direct, read domain
 		if 'gfycat' in saved_post.submission.domain:
-			result = GyfcatDownloader(saved_post)
+			result = GyfcatRedgisDownloader(saved_post)
 		elif 'imgur' in saved_post.submission.domain:
 			# check if album
 			if '/a/' in saved_post.submission.url:
@@ -538,6 +613,8 @@ def make_downloader(saved_post, is_expirmental=False):
 				result = ImagureLinkDownloader(saved_post)
 		elif is_expirmental and 'redgifs' in saved_post.submission.domain:
 			result = RedgifsDownloader(saved_post)
+		elif is_expirmental and 'eddit.com/gallery' in saved_post.submission.url:
+			result = ReditGalleryDownloader(saved_post)
 		elif is_expirmental and 'tumblr' in saved_post.submission.domain:
 			result = TumblrDownloader(saved_post)
 		elif is_expirmental and 'flickr' in saved_post.submission.domain:
@@ -551,7 +628,7 @@ def make_downloader(saved_post, is_expirmental=False):
 
 
 
-def save_posts(R, username, save_dir, namer, limit=0, is_unsave=True, is_expirmental=False):
+def save_posts(R, username, save_dir, namer, limit=0, delay=0.0, is_unsave=True, is_expirmental=False):
 	print("Logging in...")
 	# create session
 	print (R.user.me())
@@ -567,14 +644,23 @@ def save_posts(R, username, save_dir, namer, limit=0, is_unsave=True, is_expirme
 		# delete trailing slash
 		if sp.submission.url.endswith('/'):
 			sp.submission.url = sp.submission.url[0:-1]
-		print (sp.submission.url)
+		print (f"{sp.submission.url} : {sp.submission.title}")
 		# create object per submission. Trusting garbage collector!
 		d = make_downloader(sp, is_expirmental=is_expirmental)
 		if d is None:
 			sp.set_notdone("Domain '{}' not supported".format(sp.submission.domain))
-			continue
-		d.download()
-		count += 1
+		else:
+			try:
+				d.download()
+				count += 1
+			except Exception as e:
+				print (f"FAILED:  {str(e)}")
+				sp.status_code = sp.STATUS_EXCEPTION
+
+		if delay:
+			time.sleep(delay)
+
+		print (f"    Status: {sp.status_code} : {sp.error_message}")
 		if limit > 0 and count >= limit:
 			break
 
@@ -607,6 +693,7 @@ USER_AGENT = CONFIG_DATA['user_agent']
 FOLLOWING = CONFIG_DATA['following']
 SAVE_DIR = os.path.expanduser(CONFIG_DATA['save_dir'])
 NAMER_MODULE = CONFIG_DATA['namer_module']
+DELAY = CONFIG_DATA.get('delay', 0.0)
 
 #
 # Config file can name a different file namer. 
@@ -637,7 +724,7 @@ R = praw.Reddit(user_agent=USER_AGENT,
 
 
 # Download all known-working types.
-save_posts(R, USERNAME, SAVE_DIR, namer, is_unsave=True, limit=0, is_expirmental=True)
+save_posts(R, USERNAME, SAVE_DIR, namer, delay=DELAY, is_unsave=True, limit=0, is_expirmental=True)
 
 # Test expirmental
 #save_posts(R, USERNAME, SAVE_DIR, namer, is_unsave=True, limit=10, is_expirmental=True)
