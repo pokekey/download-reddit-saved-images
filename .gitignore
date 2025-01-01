@@ -7,3 +7,6 @@ env/
 *.bak
 
 local*
+
+videolist.csv
+.python-version
