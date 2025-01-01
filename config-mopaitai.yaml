@@ -4,6 +4,7 @@ user_agent: mopaitai downloader
 username: mopaitai
 password: 896kMX#Tc
 save_dir: ~/Downloads
+delay: 2.0
 
 namer_module: mynamer.py
 
@@ -38,6 +39,7 @@ following:
   - tessafowler
   - thicc-fil-a
   - xshowin_offx
+  - caylinofficial
 
 names:
   - Beth Lilly
@@ -46,3 +48,4 @@ names:
   - Lucia Javorcekova
   - Liya Silver
   - Anveshi Jain
+  - Lady Gorbunova
